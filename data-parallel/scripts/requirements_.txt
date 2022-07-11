@@ -1,0 +1,6 @@
+mpi4py
+#datasets
+#Found unsupported HuggingFace version 4.20.1 for automated tensor parallelism. HuggingFace modules will not be automatically distributed. 
+#You can use smp.tp_register_with_module API to register desired modules for tensor parallelism, or directly instantiate an smp.nn.DistributedModule. 
+#Supported HuggingFace transformers versions for automated tensor parallelism: ['4.17.0']
+#transformers==4.17.0

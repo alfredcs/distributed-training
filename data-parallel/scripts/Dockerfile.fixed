@@ -1,0 +1,93 @@
+FROM nvidia/cuda:11.5.1-base-ubuntu20.04
+
+# Remove any third-party apt sources to avoid issues with expiring keys.
+RUN rm -f /etc/apt/sources.list.d/*.list
+
+# Install some basic utilities
+RUN apt-get update && apt-get install -yq \
+    curl \
+    ca-certificates \
+    #nginx \
+    sudo \
+    git \
+    bzip2 \
+    libx11-6 \
+    build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create a working directory
+RUN mkdir /app
+WORKDIR /app
+
+# Create a non-root user and switch to it
+RUN adduser --disabled-password --gecos '' --shell /bin/bash user \
+ && chown -R user:user /app
+RUN echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-user
+USER user
+
+# All users can use /home/user as their home directory
+ENV HOME=/home/user
+RUN mkdir $HOME/.cache $HOME/.config \
+ && chmod -R 777 $HOME
+
+# Set up the Conda environment (using Miniforge)
+ENV PATH=$HOME/mambaforge/bin:$PATH
+COPY environment.yml /app/environment.yml
+RUN curl -sLo ~/mambaforge.sh https://github.com/conda-forge/miniforge/releases/download/4.12.0-2/Mambaforge-4.12.0-2-Linux-x86_64.sh \
+ && chmod +x ~/mambaforge.sh \
+ && ~/mambaforge.sh -b -p ~/mambaforge \
+ && rm ~/mambaforge.sh \
+ && mamba env update -n base -f /app/environment.yml \
+ && rm /app/environment.yml \
+ && mamba clean -ya
+
+# Install sagemaker-training toolkit that contains the common functionality necessary to create a container compatible with SageMaker and the Python SDK.
+RUN pip install --no-cache-dir sagemaker-training datasets
+
+# SMD model parallel and data parallel binaries
+ARG SMD_DATA_PARALLEL_URL
+ARG SMD_MODEL_PARALLEL_URL
+
+# Install SM Distributed Modelparallel binary and DataParallel binary
+ARG SMD_DATA_PARALLEL_URL=https://smdataparallel.s3.amazonaws.com/binary/pytorch/1.11.0/cu113/2022-04-14/smdistributed_dataparallel-1.4.1-cp38-cp38-linux_x86_64.whl
+ARG SMD_MODEL_PARALLEL_URL=https://sagemaker-distributed-model-parallel.s3.us-west-2.amazonaws.com/pytorch-1.11.0/build-artifacts/2022-04-20-17-05/smdistributed_modelparallel-1.9.0-cp38-cp38-linux_x86_64.whl
+ARG PT_TORCHDATA_URL=https://aws-pytorch-cicd-v3-binaries.s3.us-west-2.amazonaws.com/r1.11.0_v3_e3/aws-torchdata/torchdata-0.4.0-cp38-cp38-linux_x86_64.whl
+ARG PT_S3_WHL_GPU=https://aws-s3-plugin.s3.us-west-2.amazonaws.com/binaries/0.0.1/1c3e69e/awsio-0.0.1-cp38-cp38-manylinux1_x86_64.whl
+
+RUN pip install --upgrade pip
+#RUN pip -v install --no-cache-dir -U ${PT_TORCHDATA_URL} ${PT_S3_WHL_GPU}
+RUN pip -v install --no-cache-dir -U ${SMD_MODEL_PARALLEL_URL} 
+RUN SMDATAPARALLEL_PT=1 pip install --no-cache-dir ${SMD_DATA_PARALLEL_URL}
+ENV LD_LIBRARY_PATH="/opt/conda/lib/python${PYTHON_SHORT_VERSION}/site-packages/smdistributed/dataparallel/lib:$LD_LIBRARY_PATH"
+
+
+## /opt/ml and all subdirectories are utilized by SageMaker, use the /code subdirectory to store your user code.
+#COPY /qa /opt/ml/code
+COPY trainer_qa.py /opt/ml/code/trainer_qa.py
+COPY run_qa.py /opt/ml/code/train.py
+COPY utils_qa.py /opt/ml/code/utils_qa.py
+COPY inference /opt/program
+
+# Set user back to root
+USER root
+
+# Setup env for Nginix
+#RUN mkdir -p /var/log/nginix \
+# && chown -R www-data:www-data /var/log/nginx \
+# && chmod -R 755 /var/log/nginx
+
+# this environment variable is used by the SageMaker PyTorch container to determine our user code directory.
+ENV SAGEMAKER_SUBMIT_DIRECTORY /opt/ml/code
+ENV PATH="/opt/ml/code:/opt/program:${PATH}"
+
+# Set some environment variables. PYTHONUNBUFFERED keeps Python from buffering our standard
+# output stream, which means that logs can be delivered to the user quickly. PYTHONDONTWRITEBYTECODE
+# keeps Python from writing the .pyc files which are unnecessary in this case. We also update
+# PATH so that the train and serve programs are found when the container is invoked.
+ENV PYTHONUNBUFFERED=TRUE
+ENV PYTHONDONTWRITEBYTECODE=TRUE
+
+# this environment variable is used by the SageMaker PyTorch container to determine our program entry point
+# for training and serving.
+# For more information: https://github.com/aws/sagemaker-pytorch-container
+ENV SAGEMAKER_PROGRAM /opt/ml/code/train.py
